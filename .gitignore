@@ -133,3 +133,5 @@ dmypy.json
 .pyre/
 /tests
 CLAUDE.md
+docker-compose.yml
+ha-config/
