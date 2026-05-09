@@ -253,6 +253,45 @@ REMAINING_CHARGE_TIME_ENTITY_DESCRIPTION = ToyotaSensorEntityDescription(
     attributes_fn=lambda vehicle: None,  # noqa : ARG005
 )
 
+def _format_last_trip_attributes(vehicle: "Vehicle") -> dict[str, Any] | None:
+    trip = vehicle.last_trip
+    if trip is None:
+        return None
+    attrs: dict[str, Any] = {
+        "start_time": trip.start_time.isoformat() if trip.start_time else None,
+        "end_time": trip.end_time.isoformat() if trip.end_time else None,
+        "duration": td_to_hoursminutes(trip.duration),
+        "fuel_consumed": round(trip.fuel_consumed, 3),
+        "average_fuel_consumed": round(trip.average_fuel_consumed, 3),
+    }
+    if trip.locations:
+        if trip.locations.start:
+            attrs["start_latitude"] = trip.locations.start.lat
+            attrs["start_longitude"] = trip.locations.start.lon
+        if trip.locations.end:
+            attrs["end_latitude"] = trip.locations.end.lat
+            attrs["end_longitude"] = trip.locations.end.lon
+    if trip.ev_distance is not None:
+        attrs["ev_distance"] = round(trip.ev_distance, 1)
+        if trip.distance:
+            attrs["ev_distance_pct"] = round(trip.ev_distance / trip.distance * 100, 1)
+    return attrs
+
+
+LAST_TRIP_ENTITY_DESCRIPTION = ToyotaSensorEntityDescription(
+    key="last_trip",
+    translation_key="last_trip",
+    icon="mdi:map-marker-path",
+    device_class=SensorDeviceClass.DISTANCE,
+    state_class=SensorStateClass.MEASUREMENT,
+    suggested_display_precision=1,
+    value_fn=lambda vehicle: (
+        None if vehicle.last_trip is None else round_number(vehicle.last_trip.distance, 1)
+    ),
+    attributes_fn=_format_last_trip_attributes,
+)
+
+
 STATISTICS_ENTITY_DESCRIPTIONS_DAILY = ToyotaStatisticsSensorEntityDescription(
     key="current_day_statistics",
     translation_key="current_day_statistics",
@@ -396,6 +435,12 @@ def create_sensor_configurations(metric_values: bool) -> list[dict[str, Any]]:  
             ),
             "native_unit": "min",
             "suggested_unit": "min",
+        },
+        {
+            "description": LAST_TRIP_ENTITY_DESCRIPTION,
+            "capability_check": lambda v: True,  # noqa: ARG005
+            "native_unit": get_length_unit(metric_values),
+            "suggested_unit": get_length_unit(metric_values),
         },
         {
             "description": STATISTICS_ENTITY_DESCRIPTIONS_DAILY,

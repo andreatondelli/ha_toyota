@@ -122,6 +122,22 @@
       "current_year_statistics": {
         "name": "Current year statistics"
       },
+      "last_trip": {
+        "name": "Last trip",
+        "state_attributes": {
+          "start_time": {"name": "Start time"},
+          "end_time": {"name": "End time"},
+          "duration": {"name": "Duration"},
+          "fuel_consumed": {"name": "Fuel consumed"},
+          "average_fuel_consumed": {"name": "Avg fuel consumption"},
+          "start_latitude": {"name": "Start latitude"},
+          "start_longitude": {"name": "Start longitude"},
+          "end_latitude": {"name": "End latitude"},
+          "end_longitude": {"name": "End longitude"},
+          "ev_distance": {"name": "EV distance"},
+          "ev_distance_pct": {"name": "EV distance %"}
+        }
+      },
       "last_successful_fetch": {
         "name": "Last successful fetch"
       },
