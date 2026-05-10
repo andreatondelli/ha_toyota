@@ -131,7 +131,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-/tests
 CLAUDE.md
 docker-compose.yml
 ha-config/

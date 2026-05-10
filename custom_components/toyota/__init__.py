@@ -912,6 +912,18 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
+    # Trip statistics coordinator — runs independently every 6 h.
+    # First sync (backfill) is fired as a background task so it does not
+    # block the config-entry setup. A no-op listener keeps the coordinator
+    # alive so it auto-refreshes on its own schedule.
+    from .trip_statistics import TripStatisticsCoordinator  # noqa: PLC0415
+
+    trip_coordinator = TripStatisticsCoordinator(hass, coordinator)
+    unsubscribe_trip = trip_coordinator.async_add_listener(lambda: None)
+    entry.async_on_unload(unsubscribe_trip)
+    hass.async_create_task(trip_coordinator.async_refresh())
+    hass.data[DOMAIN][entry.entry_id + "_trips"] = trip_coordinator
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
