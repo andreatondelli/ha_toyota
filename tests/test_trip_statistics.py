@@ -190,7 +190,8 @@ def test_import_statistics_sorted_by_start_time():
         _import_statistics(MagicMock(), "VIN02", trips)
 
     dist_rows = next(d for sid, d in captured if "distance" in sid)
-    assert dist_rows[0]["start"] == datetime.fromisoformat(_T0.isoformat())
+    expected_hour = _T0.replace(minute=0, second=0, microsecond=0)
+    assert dist_rows[0]["start"] == expected_hour
     assert dist_rows[0]["sum"] == pytest.approx(10.0)
     assert dist_rows[1]["sum"] == pytest.approx(25.0)
 

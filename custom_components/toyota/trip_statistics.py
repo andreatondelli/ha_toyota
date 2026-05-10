@@ -13,7 +13,11 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
+from homeassistant.components.recorder.models import (
+    StatisticData,
+    StatisticMeanType,
+    StatisticMetaData,
+)
 from homeassistant.components.recorder.statistics import async_add_external_statistics
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -27,6 +31,8 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 1
+# Bump when the statistics format changes to force a full re-import on next run.
+_STATISTICS_VERSION = 1
 _INTER_CALL_DELAY = 1.5      # seconds between consecutive get_trips() calls
 _INCREMENTAL_LOOKBACK_DAYS = 60
 _MAX_EMPTY_MONTHS = 3         # stop backfill after this many consecutive empty months
@@ -83,7 +89,12 @@ def _prev_month(d: date) -> date:
 # ---------------------------------------------------------------------------
 
 def _import_statistics(hass: HomeAssistant, vin: str, trips: list[dict[str, Any]]) -> None:
-    """Compute cumulative sums from sorted trips and push to HA recorder."""
+    """Compute cumulative sums from sorted trips and push to HA recorder.
+
+    HA requires statistics timestamps to be on hourly boundaries. Trips that
+    fall within the same clock hour are merged: state accumulates, sum reflects
+    the cumulative total after all trips in that hour.
+    """
     valid = sorted(
         (t for t in trips if t.get("start_time")),
         key=lambda t: t["start_time"],
@@ -91,33 +102,57 @@ def _import_statistics(hass: HomeAssistant, vin: str, trips: list[dict[str, Any]
     if not valid:
         return
 
+    # Buckets keyed by top-of-the-hour datetime: {"state": float, "sum": float}
+    dist_buckets: dict[datetime, dict[str, float]] = {}
+    fuel_buckets: dict[datetime, dict[str, float]] = {}
+    ev_buckets: dict[datetime, dict[str, float]] = {}
+    dur_buckets: dict[datetime, dict[str, float]] = {}
+
     cum_dist = cum_fuel = cum_ev = cum_dur = 0.0
-    dist_rows: list[StatisticData] = []
-    fuel_rows: list[StatisticData] = []
-    ev_rows: list[StatisticData] = []
-    dur_rows: list[StatisticData] = []
 
     for t in valid:
-        start = datetime.fromisoformat(t["start_time"])
+        hour = datetime.fromisoformat(t["start_time"]).replace(minute=0, second=0, microsecond=0)
 
         dist = t.get("distance_km") or 0.0
         cum_dist += dist
-        dist_rows.append(StatisticData(start=start, state=dist, sum=cum_dist))
+        if hour in dist_buckets:
+            dist_buckets[hour]["state"] += dist
+        else:
+            dist_buckets[hour] = {"state": dist}
+        dist_buckets[hour]["sum"] = cum_dist
 
         fuel = t.get("fuel_consumed_l") or 0.0
         cum_fuel += fuel
-        fuel_rows.append(StatisticData(start=start, state=fuel, sum=cum_fuel))
+        if hour in fuel_buckets:
+            fuel_buckets[hour]["state"] += fuel
+        else:
+            fuel_buckets[hour] = {"state": fuel}
+        fuel_buckets[hour]["sum"] = cum_fuel
 
         ev = t.get("ev_distance_km")
         if ev is not None:
             cum_ev += ev
-            ev_rows.append(StatisticData(start=start, state=ev, sum=cum_ev))
+            if hour in ev_buckets:
+                ev_buckets[hour]["state"] += ev
+            else:
+                ev_buckets[hour] = {"state": ev}
+            ev_buckets[hour]["sum"] = cum_ev
 
         dur_s = t.get("duration_seconds")
         if dur_s is not None:
             dur_min = dur_s / 60.0
             cum_dur += dur_min
-            dur_rows.append(StatisticData(start=start, state=dur_min, sum=cum_dur))
+            if hour in dur_buckets:
+                dur_buckets[hour]["state"] += dur_min
+            else:
+                dur_buckets[hour] = {"state": dur_min}
+            dur_buckets[hour]["sum"] = cum_dur
+
+    def _to_rows(buckets: dict[datetime, dict[str, float]]) -> list[StatisticData]:
+        return [
+            StatisticData(start=h, state=v["state"], sum=v["sum"])
+            for h, v in buckets.items()
+        ]
 
     prefix = f"{DOMAIN}:{vin.lower()}"
 
@@ -128,6 +163,7 @@ def _import_statistics(hass: HomeAssistant, vin: str, trips: list[dict[str, Any]
             hass,
             StatisticMetaData(
                 has_mean=False,
+                mean_type=StatisticMeanType.NONE,
                 has_sum=True,
                 name=name,
                 source=DOMAIN,
@@ -137,10 +173,10 @@ def _import_statistics(hass: HomeAssistant, vin: str, trips: list[dict[str, Any]
             rows,
         )
 
-    _push("trip_distance", "Trip distance", "km", dist_rows)
-    _push("trip_fuel_consumed", "Trip fuel consumed", "L", fuel_rows)
-    _push("trip_ev_distance", "Trip EV distance", "km", ev_rows)
-    _push("trip_duration_min", "Trip duration", "min", dur_rows)
+    _push("trip_distance", "Trip distance", "km", _to_rows(dist_buckets))
+    _push("trip_fuel_consumed", "Trip fuel consumed", "L", _to_rows(fuel_buckets))
+    _push("trip_ev_distance", "Trip EV distance", "km", _to_rows(ev_buckets))
+    _push("trip_duration_min", "Trip duration", "min", _to_rows(dur_buckets))
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +224,7 @@ class TripStatisticsCoordinator(DataUpdateCoordinator[None]):
         }
 
         was_first_run = not data.get("backfill_done", False)
+        needs_reimport = data.get("statistics_version", 0) < _STATISTICS_VERSION
         initial_count = len(data["trips"])
         existing_starts: set[str] = {
             t["start_time"] for t in data["trips"] if t.get("start_time")
@@ -209,15 +246,17 @@ class TripStatisticsCoordinator(DataUpdateCoordinator[None]):
                 existing_starts.add(key)
 
         added = len(data["trips"]) - initial_count
+        should_import = added > 0 or was_first_run or needs_reimport
 
-        if added > 0 or was_first_run:
-            await store.async_save(data)
+        if should_import:
             if data["trips"]:
                 _LOGGER.debug(
                     "Trip statistics: importing %d total trips for VIN ...%s (%d new)",
                     len(data["trips"]), vin[-6:], added,
                 )
                 _import_statistics(self.hass, vin, data["trips"])
+            data["statistics_version"] = _STATISTICS_VERSION
+            await store.async_save(data)
         else:
             _LOGGER.debug("Trip statistics: no new trips for VIN ...%s", vin[-6:])
 
